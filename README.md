@@ -1,20 +1,34 @@
 # Quiz Trivia API
 
+[![CI](https://github.com/sanimanqezu/quiz-trivia-api/actions/workflows/ci.yml/badge.svg)](https://github.com/sanimanqezu/quiz-trivia-api/actions/workflows/ci.yml)
+
 A RESTful Quiz & Trivia API built with **Spring Boot 3**, **Spring Data JPA**, **PostgreSQL**, and **Flyway**. Players can create quizzes, add questions with answer options, start timed quiz sessions, submit answers with real-time scoring feedback, and view a leaderboard of top scores.
 
 ## Tech Stack
 
 | Layer      | Technology                                |
 |------------|-------------------------------------------|
-| Language   | Java 17                                   |
-| Framework  | Spring Boot 3.2.5                         |
+| Language   | Java 25                                   |
+| Framework  | Spring Boot 3.5.16                        |
 | Persistence| Spring Data JPA + Hibernate               |
 | Database   | PostgreSQL 16 (runtime), H2 (tests)       |
 | Migrations | Flyway                                    |
 | Validation | Jakarta Bean Validation                   |
+| Observability | Spring Actuator (health / info)        |
 | Utilities  | Lombok                                    |
 | Testing    | JUnit 5 + Mockito + AssertJ               |
 | Container  | Docker + Docker Compose                   |
+
+---
+
+## Key design points
+
+- **Layered architecture.** `QuizController` and `QuizSessionController` stay thin; all logic lives in `QuizService` (quiz/question authoring) and `QuizSessionService` (gameplay, scoring, leaderboard). Services default to `@Transactional(readOnly = true)` and opt into write transactions explicitly.
+- **Records as DTOs with validation at the edge.** Requests are immutable records annotated with Jakarta Bean Validation (`@NotBlank`, `@NotNull`, `@Min`/`@Max`, `@Pattern` for A–D option labels); `@Valid` cascades into nested answer options.
+- **Stateful gameplay with guardrails.** Submitting an answer rejects completed sessions, duplicate answers for the same question, and questions that do not belong to the session's quiz. Answer comparison is trimmed and case-insensitive, and the running score is persisted as play progresses.
+- **RFC 9457 Problem Details.** A single `@RestControllerAdvice` returns `application/problem+json`: `ResourceNotFoundException` → 404, `BadRequestException` → 400, and bean-validation failures → 422 with per-field errors.
+- **Schema owned by Flyway.** `ddl-auto` is `validate`; the schema is created and versioned by migration scripts rather than Hibernate.
+- **Environment-driven configuration.** Datasource host, port, name, and credentials come from environment variables with local defaults.
 
 ---
 
@@ -40,8 +54,13 @@ quiz-trivia-api/
 │   │       └── db/migration/
 │   │           └── V1__create_tables.sql
 │   └── test/
-│       ├── java/com/sanele/quiztrivia/service/
-│       │   └── QuizSessionServiceTest.java
+│       ├── java/com/sanele/quiztrivia/
+│       │   ├── controller/
+│       │   │   ├── QuizControllerTest.java
+│       │   │   └── QuizSessionControllerTest.java
+│       │   └── service/
+│       │       ├── QuizServiceTest.java
+│       │       └── QuizSessionServiceTest.java
 │       └── resources/
 │           └── application.yml
 ├── Dockerfile
@@ -55,47 +74,51 @@ quiz-trivia-api/
 
 ### Prerequisites
 
-- Java 17+
-- Maven 3.8+
-- Docker & Docker Compose (for containerized setup)
+- Java 25
+- Maven 3.9+
+- Docker & Docker Compose
 
-### Run with Docker Compose (Recommended)
+### Running locally
 
-```bash
-# Clone the repository
-git clone https://github.com/sanele/quiz-trivia-api.git
-cd quiz-trivia-api
-
-# Build and start all services (API + PostgreSQL)
-docker-compose up --build
-
-# The API will be available at http://localhost:8080
-```
-
-### Run Locally
-
-1. Start a PostgreSQL instance:
-   ```bash
-   docker run -d \
-     --name quiz-postgres \
-     -e POSTGRES_DB=quiz_trivia \
-     -e POSTGRES_USER=postgres \
-     -e POSTGRES_PASSWORD=postgres \
-     -p 5432:5432 \
-     postgres:16-alpine
-   ```
-
-2. Build and run the application:
-   ```bash
-   mvn clean package -DskipTests
-   java -jar target/quiz-trivia-api-1.0.0.jar
-   ```
-
-### Run Tests
+This service connects to the **shared portfolio PostgreSQL** instance rather than bundling its own. Start that first from the portfolio root, then run the app.
 
 ```bash
-mvn test
+# 1. From the portfolio root, start the shared Postgres (and the portfolio-net network)
+docker compose up -d
+
+# 2. Configure the datasource (defaults shown; override as needed)
+export DB_HOST=localhost
+export DB_PORT=5432
+export DB_NAME=quiz_trivia
+export DB_USERNAME=postgres
+export DB_PASSWORD=postgres
+
+# 3. Run the application
+./mvnw spring-boot:run
 ```
+
+The API will be available at `http://localhost:8080`, with health at `http://localhost:8080/actuator/health`.
+
+### Running the container
+
+The provided `docker-compose.yml` builds the API image and attaches it to the external `portfolio-net` network so it can reach the shared Postgres:
+
+```bash
+docker compose up --build -d
+```
+
+### Tests
+
+```bash
+./mvnw test
+```
+
+Tests are self-contained — no real database or network is required.
+
+- **Service unit tests** — `QuizServiceTest` and `QuizSessionServiceTest` use `@ExtendWith(MockitoExtension.class)` with mocked repositories, covering quiz/question authoring, session start, answer submission (correct, wrong, case-insensitive, duplicate, foreign-question, completed-session), scoring, leaderboard ranking, and not-found cases.
+- **Controller slice tests** — `QuizControllerTest` and `QuizSessionControllerTest` use `@WebMvcTest` with `@MockitoBean` services, asserting status codes, request delegation, validation failures mapping to 422, and domain exceptions mapping through the global handler (404 / 400).
+
+Current suite: **47 tests** (26 service + 21 controller).
 
 ---
 
